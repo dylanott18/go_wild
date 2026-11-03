@@ -1,0 +1,106 @@
+name: Scan Frontier & deploy
+
+on:
+  schedule:
+    # Every 30 minutes. scraper/run.js decides which tiers in config.json are
+    # actually due, so most runs only refresh the near-term dates.
+    - cron: '7,37 * * * *'
+    # Extra runs right after midnight Eastern/Central/Mountain/Pacific, when
+    # next-day GoWild seats tend to open up.
+    - cron: '3 4,5,6,7,8 * * *'
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: 'Force tiers (comma list: near,hubs,ahead or "all"). Blank = whatever is due.'
+        required: false
+      route:
+        description: 'Check one route now, e.g. DEN-LAS (overrides tier)'
+        required: false
+      date:
+        description: 'Date(s) for the route, YYYY-MM-DD (comma list). Blank = today.'
+        required: false
+  push:
+    branches: [main]
+    paths: ['web/**', '.github/workflows/scan.yml']
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 58
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch data branch
+        run: |
+          if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
+            git clone --depth 1 --branch data "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
+          else
+            mkdir -p data
+          fi
+
+      - uses: actions/setup-node@v4
+        if: github.event_name != 'push'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install scraper
+        if: github.event_name != 'push'
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Scan
+        if: github.event_name != 'push'
+        continue-on-error: true
+        env:
+          TIER: ${{ inputs.tier }}
+          ROUTE: ${{ inputs.route }}
+          DATES: ${{ inputs.date }}
+        run: |
+          ARGS=""
+          if [ -n "$ROUTE" ]; then ARGS="--route=$ROUTE"; [ -n "$DATES" ] && ARGS="$ARGS --date=$DATES";
+          elif [ -n "$TIER" ]; then ARGS="--tier=$TIER"; fi
+          node scraper/run.js $ARGS
+
+      - name: Save data branch
+        if: github.event_name != 'push'
+        working-directory: data
+        run: |
+          # The data branch is kept as a single commit so the repo never bloats.
+          git init -q 2>/dev/null || true
+          git config user.name "go-wild-bot"
+          git config user.email "go-wild-bot@users.noreply.github.com"
+          git checkout -q --orphan snapshot
+          git add -A
+          git commit -q -m "Data snapshot $(date -u +%FT%TZ)" || exit 0
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" snapshot:data
+
+      - name: Build site
+        run: |
+          mkdir -p _site/data
+          cp -r web/. _site/
+          for f in index.json history.json routes.json; do [ -f "data/$f" ] && cp "data/$f" _site/data/; done
+          [ -d data/days ] && cp -r data/days _site/data/
+          touch _site/.nojekyll
+          du -sh _site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4

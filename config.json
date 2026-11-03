@@ -1,0 +1,16 @@
+{
+  "homeAirports": ["DEN"],
+  "hubs": ["DEN", "MCO", "LAS", "ATL", "PHL"],
+  "tiers": [
+    { "name": "near",  "scope": "home", "daysAhead": [0, 1], "everyMinutes": 60 },
+    { "name": "hubs",  "scope": "hubs", "daysAhead": [0, 1], "everyMinutes": 180 },
+    { "name": "ahead", "scope": "home", "daysAhead": [2, 3, 4, 5, 6, 7, 8, 9, 10], "everyMinutes": 720 }
+  ],
+  "hubDirections": "both",
+  "concurrency": 2,
+  "maxPagesPerRun": 450,
+  "maxMinutes": 45,
+  "abortAfterConsecutiveBlocks": 6,
+  "retentionDays": 60,
+  "extraAirports": []
+}

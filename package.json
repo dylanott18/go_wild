@@ -1,0 +1,18 @@
+{
+  "name": "go_wild",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Live Frontier GoWild Pass seat tracker: everywhere search, calendar, seats left, hidden connections and day trips.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "scrape": "node scraper/run.js",
+    "plan": "node scraper/run.js --dry-run",
+    "dev": "node scripts/serve.js",
+    "demo": "node scripts/demo-data.js && DATA_DIR=demo-data node scripts/serve.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "playwright": "1.48.2"
+  }
+}
