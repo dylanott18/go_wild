@@ -4,6 +4,8 @@ A free, self-hosted tracker for Frontier **GoWild Pass** seats. Scheduled GitHub
 
 - **Seats left.** For every flight: the GoWild fare, **GoWild seats remaining**, Discount Den fare and seats, and when it was last checked. Seat counts are color-coded with a text label (`1 left`, `4 left`, `Available`, `Sold out`).
 - **Everywhere from / Everywhere to.** Every GoWild flight out of, or into, your airport on a date, grouped by airport. You can filter by nonstop, minimum seats, or departure window, and sort by time, price, seats, or duration.
+- **Round trips.** Pick a departure date and a return date to see every destination with GoWild seats both ways, plus the one-way-only options.
+- **Blackout dates + booking window.** GoWild blackout dates are marked in the date strip and calendar (list in `config.json`). The status panel shows the furthest-out date the scanner has actually seen GoWild seats.
 - **Date strip + full calendar.** GoWild counts per day for the next two weeks, plus a 12-month calendar heat map that includes the history kept so far.
 - **Day trips ("no hotel").** Out in the morning and back the same night, with GoWild seats both ways, ranked by hours at the destination.
 - **Hidden connections.** Two separate GoWild tickets through a connecting airport that Frontier won't sell as one itinerary. Destinations you can *only* reach this way are listed first.
@@ -48,7 +50,8 @@ After that it runs on its own every 30 minutes, plus extra runs just after midni
 |---|---|
 | `homeAirports` | Airports scanned **to and from every Frontier airport**. Add a friend's home airport here. Each one adds roughly 250 pages per date. |
 | `hubs` | Connecting airports whose nonstops are also scanned, which powers hidden connections. |
-| `tiers` | `{ scope: home \| hubs \| routes, daysAhead: [...], everyMinutes }`. Default: today and tomorrow every hour, the next 2–10 days every 12 hours, and hub nonstops every 3 hours. |
+| `tiers` | `{ scope: home \| hubs \| routes \| home-nonstops, daysAhead: [...] or dateRange: [from, to], everyMinutes }`. Default: today and tomorrow every hour, the next 2–10 days every 12 hours, hub nonstops every 3 hours, and a `plan` tier covering winter break (Dec 12 – Jan 10, home airport's nonstops in both directions) every 3 days. |
+| `blackoutDates` | GoWild blackout dates shown in the app. Confirm against Frontier's current list. |
 | `concurrency`, `maxPagesPerRun`, `maxMinutes` | Volume controls. Lower them to be gentler on Frontier. |
 | `abortAfterConsecutiveBlocks` | Stop a run early if Frontier starts blocking. |
 | `extraAirports` | Add airports missing from `web/lib/airports.js`: `{ "code", "city", "region", "lat", "lon", "tz" }`. |
@@ -92,6 +95,8 @@ npm run scrape -- --route=DEN-LAS --date=2026-11-05 --headed   # watch one real 
 Layout: `scraper/` (Frontier client, scheduler, JSON store) · `web/` (static app, no build step) · `.github/workflows/scan.yml`.
 
 ## Caveats
+
+- **GoWild seats open late.** Domestic GoWild fares go on sale the day before departure, and international ones 10 days before. For dates further out (e.g. winter break), the app shows Frontier's schedule and regular fares for planning, and GoWild seats appear as they open. Set alerts so you don't miss them.
 
 - This automates searches on Frontier's site, which Frontier's terms of service likely prohibit. Use it at personal volume. Search pages don't require login, so the scanner never uses your account.
 - Seat counts are as of the last check and can change in seconds. Frontier sometimes shows GoWild availability without a count; the app marks those flights as **Available**.

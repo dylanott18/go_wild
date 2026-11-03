@@ -50,8 +50,12 @@ for (let i = 0; i < 8; i++) index.recentRuns.push({ at: now - 600 - i * 3600, pa
 const history = {};
 
 const today = localToday('America/Denver');
-for (let off = -20; off <= 10; off++) {
-  const date = addDays(today, off);
+const cfg = JSON.parse(await fs.readFile(path.join(ROOT, 'config.json'), 'utf8'));
+index.blackoutDates = cfg.blackoutDates ?? [];
+const winter = Array.from({ length: 12 }, (_, i) => addDays('2026-12-16', i));
+const demoDates = [...Array.from({ length: 31 }, (_, i) => addDays(today, i - 20)), ...winter];
+for (const date of demoDates) {
+  const off = Math.round((Date.parse(date) - Date.parse(today)) / 864e5);
   const day = emptyDay(date);
   const byRoute = new Map();
   let n = 100;
@@ -60,7 +64,7 @@ for (let off = -20; off <= 10; off++) {
     const deps = [360 + Math.floor(rnd() * 120), 690 + Math.floor(rnd() * 200), 1050 + Math.floor(rnd() * 180)].slice(0, count);
     const its = deps.map((dm) => {
       const f = flight(o, d, date, dm, n++);
-      const gwOpen = off <= 1 ? rnd() < 0.75 : rnd() < 0.35;
+      const gwOpen = off > 10 ? false : off <= 1 ? rnd() < 0.75 : rnd() < 0.35;
       const base = 14.98 + Math.round(rnd() * 6) * 10;
       return { k: `${o}-${d}-${date}-${f.f}`, o, d, dep: f.dep, arr: f.arr, dur: f.dur, st: 0, legs: [[f.f, o, d, f.dep, f.arr]],
         gw: gwOpen ? base : null, gws: gwOpen ? (rnd() < 0.3 ? null : 1 + Math.floor(rnd() * 9)) : null,
@@ -90,6 +94,7 @@ for (let off = -20; off <= 10; off++) {
   }
   await fs.writeFile(path.join(OUT, 'days', `${date}.json`), JSON.stringify(day));
   index.dates[date] = summarizeDay(day);
+  index.gowildHorizon = { days: 10, date: addDays(today, 10) };
   history[date] = minFareByRoute(day);
 }
 await fs.writeFile(path.join(OUT, 'index.json'), JSON.stringify(index));

@@ -273,3 +273,9 @@ footer { padding: 30px 0 50px; font-size: 12px; color: var(--muted); }
 .map-pop button { margin-top: 6px; border: 1px solid #ccc; border-radius: 6px; padding: 3px 9px; cursor: pointer; background: #fff; color: #111; }
 .leaflet-tooltip.map-origin { font-weight: 700; }
 pre.code { background: var(--surface-2); border-radius: 8px; padding: 10px; font: 12px/1.4 var(--mono); white-space: pre-wrap; word-break: break-all; }
+
+/* blackout dates */
+.date-chip.blackout { border-style: dashed; }
+.date-chip.blackout .dcount { color: var(--critical); font-weight: 650; }
+.cal-day.blackout { background-image: repeating-linear-gradient(135deg, transparent 0 4px, color-mix(in srgb, var(--critical) 22%, transparent) 4px 6px); }
+.notice .toggle { margin-left: 6px; min-height: 28px; padding: 2px 10px; }

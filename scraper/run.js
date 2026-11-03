@@ -74,15 +74,36 @@ function knownNonstopsTo(code) {
 
 async function buildPlan(tiers) {
   const tasks = new Map();
-  const add = (o, d, offset, tierIdx, maxAgeMin) => {
+  const add = (o, d, offset, tierIdx, maxAgeMin, fixedDate = null) => {
     if (o === d || !airportMap[o] || !airportMap[d]) return;
-    const date = addDays(localToday(airportMap[o].tz, nowMs), offset);
+    const date = fixedDate ?? addDays(localToday(airportMap[o].tz, nowMs), offset);
     const key = `${o}-${d}|${date}`;
     const prio = offset * 10 + tierIdx;
     const cur = tasks.get(key);
-    if (!cur || cur.prio > prio) tasks.set(key, { o, d, date, prio, maxAgeMin, tier: tiers[tierIdx].name });
+    // Far-future planning scans must not mark routes as "no service" just
+    // because the schedule isn't loaded that far out.
+    if (!cur || cur.prio > prio) tasks.set(key, { o, d, date, prio, maxAgeMin, tier: tiers[tierIdx].name, learn: !fixedDate });
   };
+  const todayDen = localToday(airportMap[home[0]]?.tz ?? 'America/Denver', nowMs);
   tiers.forEach((tier, tierIdx) => {
+    if (tier.dateRange) {
+      // { scope: "home-nonstops", dateRange: ["2026-12-12", "2027-01-10"] }:
+      // the home airport's known nonstop routes, both directions, every date.
+      const [from, to] = tier.dateRange;
+      let skipped = 0;
+      for (let date = from < todayDen ? todayDen : from; date <= to; date = addDays(date, 1)) {
+        const offset = Math.max(0, Math.round((Date.parse(date) - Date.parse(todayDen)) / 864e5));
+        for (const h of home) {
+          const outs = tier.scope === 'home' ? codes : knownNonstopsFrom(h);
+          const ins = tier.scope === 'home' ? codes : knownNonstopsTo(h);
+          if (!outs.length && !ins.length) skipped++;
+          for (const x of outs) add(h, x, offset, tierIdx, tier.everyMinutes, date);
+          for (const x of ins) add(x, h, offset, tierIdx, tier.everyMinutes, date);
+        }
+      }
+      if (skipped) log(`Tier ${tier.name}: no nonstop routes learned yet for ${home.join(', ')}; it starts after the first near-term scan.`);
+      return;
+    }
     for (const offset of tier.daysAhead ?? [0]) {
       if (tier.scope === 'home') {
         for (const h of home) {
@@ -180,7 +201,7 @@ async function worker(id) {
       stats.changes += evs.length;
       for (const ev of evs) alertEvents.push({ ...ev, date: t.date });
       learnLegs(routes, res.itineraries, t.date);
-      recordRouteResult(state, route, res.itineraries.length, ts);
+      if (t.learn !== false) recordRouteResult(state, route, res.itineraries.length, ts);
       if (!res.itineraries.length) stats.empty++;
       const gw = res.itineraries.filter((i) => i.gw != null);
       if (gw.length) log(`${t.date} ${route}: ${res.itineraries.length} itins, ${gw.length} GoWild`);
@@ -235,6 +256,18 @@ log(`Done: ${stats.ok} ok (${stats.empty} empty), ${stats.blocked} blocked, ${st
 if (stats.ok === 0 && stats.pages > 0) process.exitCode = 1;
 
 // ---------- index ----------
+/** Furthest date (in days from today) on which any GoWild seat has been seen. */
+function gowildHorizon(dates) {
+  const today = localToday(airportMap[home[0]]?.tz ?? 'America/Denver', Date.now());
+  let best = null;
+  for (const [date, d] of Object.entries(dates)) {
+    if (date < today || !d.gowild) continue;
+    const off = Math.round((Date.parse(date) - Date.parse(today)) / 864e5);
+    if (best == null || off > best.days) best = { days: off, date };
+  }
+  return best;
+}
+
 async function writeIndex(runsList) {
   const dir = path.join(DATA, 'days');
   await fs.mkdir(dir, { recursive: true });
@@ -257,6 +290,8 @@ async function writeIndex(runsList) {
     homeAirports: home,
     hubs,
     extraAirports: config.extraAirports ?? [],
+    blackoutDates: config.blackoutDates ?? [],
+    gowildHorizon: gowildHorizon(dates),
     alerts: (config.alerts ?? []).map((a) => ({ name: a.name, from: a.from, to: a.to, notify: a.notify })),
     tiers: (config.tiers ?? []).map((t) => ({ name: t.name, scope: t.scope, daysAhead: t.daysAhead, everyMinutes: t.everyMinutes, lastRun: state.tiers?.[t.name] ?? null })),
     lastRun: runs[0] ?? null,

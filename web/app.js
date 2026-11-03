@@ -41,6 +41,7 @@ const S = {
   expanded: new Set(),
   track: store.get('gw.track', []),
   view: store.get('gw.view', 'list'),
+  ret: null,
   mapGroups: null,
 };
 
@@ -49,10 +50,11 @@ function readHash() {
   if (p.get('o') && AP[p.get('o')]) S.origin = p.get('o');
   if (p.get('m')) S.mode = p.get('m');
   if (p.get('d') && /^\d{4}-\d{2}-\d{2}$/.test(p.get('d'))) S.date = p.get('d');
+  if (p.get('r') && /^\d{4}-\d{2}-\d{2}$/.test(p.get('r'))) S.ret = p.get('r');
   return p;
 }
 function writeHash() {
-  const p = new URLSearchParams({ o: S.origin, m: S.mode, d: S.date });
+  const p = new URLSearchParams({ o: S.origin, m: S.mode, d: S.date, ...(S.mode === 'round' ? { r: S.ret } : {}) });
   history.replaceState(null, '', `#${p}`);
   store.set('gw.origin', S.origin);
   store.set('gw.filters', S.f);
@@ -81,6 +83,8 @@ const today = () => localToday(tzOf(S.origin));
 const isDeparted = (it) => it.dep <= localNow(tzOf(it.o));
 const isHome = (code) => (S.index?.homeAirports ?? []).includes(code);
 const pinnedKey = (k, date) => S.track.some((t) => t.k === k && t.date === date);
+const isBlackout = (d) => (S.index?.blackoutDates ?? []).includes(d);
+const passOk = (it) => !S.f.noOvernight || !isOvernight(it);
 
 // ---------------------------------------------------------------- header
 function renderOriginSelect() {
@@ -126,14 +130,15 @@ function renderDates() {
   const box = $('#dates');
   if (S.mode === 'track') { box.innerHTML = ''; return; }
   const start = today();
-  const days = Array.from({ length: 14 }, (_, i) => addDays(start, i));
-  if (!days.includes(S.date)) days.unshift(S.date);
+  // Far-off date chosen (e.g. from the calendar): centre the strip on it.
+  const first = S.date > addDays(start, 13) || S.date < start ? addDays(S.date, -3) : start;
+  const days = Array.from({ length: 14 }, (_, i) => addDays(first, i));
   box.innerHTML = days.map((d) => {
     const c = countFor(d);
     const x = dateObj(d);
-    return `<button class="date-chip${c == null ? ' unscanned' : ''}" data-date="${d}" aria-pressed="${d === S.date}" title="${fmtDate(d)}">
+    return `<button class="date-chip${c == null ? ' unscanned' : ''}${isBlackout(d) ? ' blackout' : ''}" data-date="${d}" aria-pressed="${d === S.date}" title="${fmtDate(d)}">
       <div class="dow">${d === start ? 'Today' : DOW[x.getUTCDay()]}</div><div class="dnum">${x.getUTCDate()}</div>
-      <div class="dcount">${c == null ? 'not scanned' : `${c} GW`}</div></button>`;
+      <div class="dcount">${isBlackout(d) ? 'blackout' : c == null ? 'not scanned' : `${c} GW`}</div></button>`;
   }).join('') + '<button class="date-chip cal" id="open-cal" title="Full calendar"><span style="font-size:18px">▦</span>Calendar</button>';
   box.onclick = (e) => {
     const b = e.target.closest('.date-chip');
@@ -158,6 +163,14 @@ function renderFilters() {
       + sel('window', 'Departs', [['any', 'Any time'], ['morning', 'Before noon'], ['afternoon', '12–5pm'], ['evening', 'After 5pm']])
       + sel('sort', 'Sort', [['dep', 'Departure'], ['price', 'GoWild price'], ['seats', 'Most seats'], ['dur', 'Shortest'], ['code', 'Airport A–Z']])
       + `<input type="search" data-q placeholder="${S.mode === 'from' ? 'Destination' : 'Origin'} code or city" value="${esc(f.q)}">`;
+  } else if (S.mode === 'round') {
+    const opts = Array.from({ length: 28 }, (_, i) => addDays(S.date, i + 1)).map((d) => {
+      const tag = isBlackout(d) ? ' · blackout' : S.index?.dates?.[d] ? '' : ' · not scanned';
+      return `<option value="${d}"${d === S.ret ? ' selected' : ''}>${fmtDate(d)}${tag}</option>`;
+    }).join('');
+    html = `<label class="muted" style="font-size:13px">Return <select data-ret>${opts}</select></label>`
+      + tog('gw', 'GoWild both ways') + tog('nonstop', 'Nonstop only') + tog('noOvernight', 'No overnight layovers')
+      + `<input type="search" data-q placeholder="Destination code or city" value="${esc(f.q)}">`;
   } else if (S.mode === 'trips') {
     html = tog('gw', 'GoWild both ways') + tog('nonstop', 'Nonstop only')
       + sel('ground', 'At least', [[2, '2h there'], [4, '4h there'], [6, '6h there'], [8, '8h there'], [10, '10h there']])
@@ -179,6 +192,7 @@ function renderFilters() {
     render();
   };
   box.onchange = (e) => {
+    if (e.target.matches('[data-ret]')) { S.ret = e.target.value; render(); return; }
     const s = e.target.closest('[data-sel]');
     if (!s) return;
     const v = s.value;
@@ -202,6 +216,16 @@ function renderNotices(day) {
   if (S.mode !== 'track') {
     if ((S.mode === 'from' || S.mode === 'to' || S.mode === 'trips') && idx && !isHome(S.origin)) {
       n.push(`<div class="notice warn"><b>${esc(S.origin)} isn't a fully scanned airport.</b> You'll only see flights that other scans happened to pick up. To scan it on every run, add it to <span class="mono">homeAirports</span> in <span class="mono">config.json</span>.</div>`);
+    }
+    const dateAhead = Math.round((Date.parse(S.date) - Date.parse(today())) / 864e5);
+    if (isBlackout(S.date)) {
+      n.push(`<div class="notice warn"><b>${fmtDate(S.date)} is a GoWild blackout date.</b> Frontier doesn't sell pass fares on this date. You can still see the schedule and regular fares${S.f.gw ? ' <button class="toggle" data-show-schedule>Show schedule</button>' : ''}.</div>`);
+    } else if (day && dateAhead > 1 && !countFor(S.date)) {
+      const hz = S.index.gowildHorizon;
+      n.push(`<div class="notice"><b>No GoWild seats out of ${esc(S.origin)} on this date yet.</b> Domestic GoWild seats usually open the day before departure, and international ones 10 days before. ${hz ? `The furthest-out GoWild seats the scanner has seen are ${hz.days} day${hz.days === 1 ? '' : 's'} ahead. ` : ''}For planning, you can still see which flights operate and their regular fares${S.f.gw ? ' <button class="toggle" data-show-schedule>Show schedule</button>' : ''}. Pin flights to Trackr, and set an alert to hear when seats open.</div>`);
+    }
+    if (S.mode === 'round' && isBlackout(S.ret)) {
+      n.push(`<div class="notice warn"><b>Your return date, ${fmtDate(S.ret)}, is a GoWild blackout date.</b></div>`);
     }
     if (!day) {
       n.push(`<div class="notice">${fmtDate(S.date)} hasn't been scanned yet. Near-term dates refresh every hour and later dates about twice a day (see <span class="mono">config.json</span>).</div>`);
@@ -316,6 +340,45 @@ function viewEverywhere(day) {
   }).join('');
 }
 
+function viewRound(day, back) {
+  const f = S.f;
+  const ok = (it) => (!f.gw || it.gw != null) && (!f.nonstop || it.st === 0) && passOk(it) && !it.gone;
+  const outs = day.itins.filter((it) => it.o === S.origin && ok(it) && !isDeparted(it) && matchQ(it.d));
+  const backs = (back?.itins ?? []).filter((it) => it.d === S.origin && ok(it));
+  const byDest = new Map();
+  for (const it of outs) {
+    if (!byDest.has(it.d)) byDest.set(it.d, { out: [], back: [] });
+    byDest.get(it.d).out.push(it);
+  }
+  for (const it of backs) byDest.get(it.o)?.back.push(it);
+  const both = [...byDest.entries()].filter(([, v]) => v.back.length);
+  const oneWay = [...byDest.entries()].filter(([, v]) => !v.back.length);
+  const nights = Math.round((Date.parse(S.ret) - Date.parse(S.date)) / 864e5);
+  const head = `<div class="summary">${fmtDate(S.date)} → ${fmtDate(S.ret)} (${nights} night${nights > 1 ? 's' : ''}) · ${both.length} round trip${both.length === 1 ? '' : 's'}${f.gw ? ' with GoWild both ways' : ''} · ${oneWay.length} one-way only</div>`;
+  if (!outs.length) return head + emptyState('No outbound flights', f.gw ? `No GoWild seats out of ${esc(S.origin)} on ${fmtDate(S.date)} match these filters.` : 'Nothing matches these filters.');
+  const minFare = (list) => (list.some((i) => i.gw != null) ? Math.min(...list.filter((i) => i.gw != null).map((i) => i.gw)) : null);
+  both.sort((a, b) => (minFare(a[1].out) ?? 1e9) + (minFare(a[1].back) ?? 1e9) - (minFare(b[1].out) ?? 1e9) - (minFare(b[1].back) ?? 1e9));
+  const byDep = (a, b) => (a.dep < b.dep ? -1 : 1);
+  let html = head + both.map(([code, v]) => {
+    const a = AP[code];
+    const open = S.expanded.has(`r:${code}`);
+    const o = v.out.sort(byDep);
+    const r = v.back.sort(byDep);
+    const fo = minFare(o);
+    const fr = minFare(r);
+    return `<section class="group trip"><div class="group-head"><span class="code">${esc(S.origin)} ⇄ ${esc(code)}</span><span class="city">${esc(a ? `${a.city}, ${a.region}` : '')}</span><span data-wx="${code}"></span>
+      <span class="stats"><span>${o.length} out · ${r.length} back${fo != null && fr != null ? ` · from <b>${money(fo + fr)}</b> round trip` : ''}</span></span></div>
+      <div class="group-body"><div class="leg-label">Out · ${fmtDate(S.date)}</div>${(open ? o : o.slice(0, 2)).map((it) => flightRow(it, S.date)).join('')}
+      <div class="leg-label">Back · ${fmtDate(S.ret)}</div>${(open ? r : r.slice(0, 2)).map((it) => flightRow(it, S.ret)).join('')}</div>
+      ${o.length > 2 || r.length > 2 ? `<button class="more-btn" data-more="r:${code}">${open ? 'Show fewer' : `Show all ${o.length + r.length} flights`}</button>` : ''}</section>`;
+  }).join('');
+  if (oneWay.length) {
+    html += `<section class="group"><div class="group-head"><span class="city"><b>One-way only</b> · ${back ? `no matching return to ${esc(S.origin)} on ${fmtDate(S.ret)}` : `${fmtDate(S.ret)} hasn't been scanned yet`}</span></div>
+      <div class="group-body" style="padding:10px 14px;display:flex;flex-wrap:wrap;gap:6px">${oneWay.sort((x, y) => x[0].localeCompare(y[0])).map(([code, v]) => `<button class="toggle" data-oneway="${code}" title="${esc(AP[code]?.city ?? code)}">${esc(code)} <span class="muted">${v.out.length}</span></button>`).join('')}</div></section>`;
+  }
+  return html;
+}
+
 function viewTrips(day) {
   const now = S.date === today() ? localNow(tzOf(S.origin)) : null;
   let trips = findDayTrips(day.itins, S.origin, { goWildOnly: S.f.gw, minGroundMin: S.f.ground * 60, nonstopOnly: S.f.nonstop, now });
@@ -417,7 +480,13 @@ async function renderResults() {
   renderNotices(day);
   if (!day) { box.innerHTML = ''; return; }
   S.mapGroups = null;
-  box.innerHTML = S.mode === 'trips' ? viewTrips(day) : S.mode === 'hidden' ? viewHidden(day) : viewEverywhere(day);
+  if (S.mode === 'round') {
+    const back = await loadDay(S.ret);
+    if (seq !== renderSeq) return;
+    box.innerHTML = viewRound(day, back);
+  } else {
+    box.innerHTML = S.mode === 'trips' ? viewTrips(day) : S.mode === 'hidden' ? viewHidden(day) : viewEverywhere(day);
+  }
   afterRender(seq);
 }
 
@@ -458,7 +527,8 @@ async function afterRender(seq) {
 function render() {
   if (!S.origin || !AP[S.origin]) S.origin = S.index?.homeAirports?.[0] ?? 'DEN';
   if (!S.date) S.date = today();
-  if (!['from', 'to', 'trips', 'hidden', 'track'].includes(S.mode)) S.mode = 'from';
+  if (!['from', 'to', 'round', 'trips', 'hidden', 'track'].includes(S.mode)) S.mode = 'from';
+  if (!S.ret || S.ret <= S.date) S.ret = addDays(S.date, 3);
   writeHash();
   $('#origin').value = S.origin;
   renderStatus();
@@ -541,6 +611,8 @@ results.addEventListener('click', (e) => {
   if (pin) { const row = pin.closest('.flight'); togglePin(row.dataset.k, row.dataset.date); return; }
   const more = e.target.closest('[data-more]');
   if (more) { const k = more.dataset.more; S.expanded.has(k) ? S.expanded.delete(k) : S.expanded.add(k); renderResults(); return; }
+  const ow = e.target.closest('[data-oneway]');
+  if (ow) { S.mode = 'from'; S.f.q = ow.dataset.oneway; render(); return; }
   const hist = e.target.closest('[data-history]');
   if (hist) { e.stopPropagation(); openRouteHistory(hist.dataset.history); return; }
   if (e.target.closest('a')) return;
@@ -549,6 +621,10 @@ results.addEventListener('click', (e) => {
   const row = e.target.closest('.flight');
   if (row && !suppressClick) openFlight(row.dataset.k, row.dataset.date);
   suppressClick = false;
+});
+
+$('#notices').addEventListener('click', (e) => {
+  if (e.target.closest('[data-show-schedule]')) { S.f.gw = false; render(); }
 });
 
 // ---------------------------------------------------------------- modals
@@ -650,7 +726,7 @@ function openCalendar() {
   const [y0, m0] = start.split('-').map(Number);
   const counts = Object.keys(S.index?.dates ?? {}).map((d) => countFor(d) ?? 0);
   const max = Math.max(1, ...counts);
-  let html = `<div class="cal-legend">Fewer <i style="background:color-mix(in srgb, var(--accent) 15%, var(--surface-2))"></i><i style="background:color-mix(in srgb, var(--accent) 55%, var(--surface-2))"></i><i style="background:var(--accent)"></i> more GoWild flights ${S.mode === 'to' ? `into ${S.origin}` : `from ${S.origin}`} · faded = not scanned</div><div class="months">`;
+  let html = `<div class="cal-legend">Fewer <i style="background:color-mix(in srgb, var(--accent) 15%, var(--surface-2))"></i><i style="background:color-mix(in srgb, var(--accent) 55%, var(--surface-2))"></i><i style="background:var(--accent)"></i> more GoWild flights ${S.mode === 'to' ? `into ${S.origin}` : `from ${S.origin}`} · faded = not scanned · ✕ = GoWild blackout</div><div class="months">`;
   for (let i = -1; i < 12; i++) {
     const dt = new Date(Date.UTC(y0, m0 - 1 + i, 1));
     const y = dt.getUTCFullYear();
@@ -665,11 +741,12 @@ function openCalendar() {
       const c = countFor(ds);
       const pct = c ? 15 + Math.round((c / max) * 85) : 0;
       const style = c ? `background:color-mix(in srgb, var(--accent) ${pct}%, var(--surface-2));color:${pct > 55 ? 'var(--accent-ink)' : 'var(--text)'}` : '';
-      html += `<button class="cal-day${ds === S.date ? ' sel' : ''}" data-cal="${ds}" ${c == null ? 'disabled' : ''} style="${style}" title="${fmtDate(ds)}${c == null ? ' · not scanned' : ` · ${c} GoWild flights`}">${d}${c ? `<small>${c}</small>` : ''}</button>`;
+      const bo = isBlackout(ds);
+      html += `<button class="cal-day${ds === S.date ? ' sel' : ''}${bo ? ' blackout' : ''}" data-cal="${ds}" ${c == null ? 'disabled' : ''} style="${style}" title="${fmtDate(ds)}${bo ? ' · GoWild blackout' : ''}${c == null ? ' · not scanned' : ` · ${c} GoWild flights`}">${d}${c ? `<small>${c}</small>` : bo ? '<small>✕</small>' : ''}</button>`;
     }
     html += '</div></div>';
   }
-  html += '</div><p class="muted" style="font-size:12px">GoWild seats are released close to departure, so the scanner covers today through the next 10 days and keeps 60 days of history. Earlier dates show what was available then.</p>';
+  html += '</div><p class="muted" style="font-size:12px">Domestic GoWild seats open the day before departure (international: 10 days). The scanner checks today through the next 10 days often, plus the planning range in config.json (schedules and regular fares) every few days, and keeps 60 days of history.</p>';
   openModal('Calendar', html);
   $('#modal-body').onclick = (e) => {
     const b = e.target.closest('[data-cal]');
@@ -689,7 +766,8 @@ function openStatus() {
       <div><div class="k">Last update</div><div class="v" style="font-size:14px">${fmtAgo(idx.generatedAt)}</div></div>
       <div><div class="k">Pages last run</div><div class="v">${run.pages ?? 0}</div></div>
       <div><div class="k">Blocked</div><div class="v">${run.blocked ?? 0}</div></div>
-      <div><div class="k">Errors</div><div class="v">${run.errors ?? 0}</div></div></div>
+      <div><div class="k">Errors</div><div class="v">${run.errors ?? 0}</div></div>
+      <div><div class="k">GoWild seen up to</div><div class="v" style="font-size:14px">${idx.gowildHorizon ? `${idx.gowildHorizon.days} days ahead` : '—'}</div></div></div>
     <h4>Coverage</h4><p>Fully scanned (to and from every airport): <b class="mono">${esc((idx.homeAirports ?? []).join(', ') || 'none')}</b><br>
       Connecting airports scanned for hidden connections: <b class="mono">${esc((idx.hubs ?? []).join(', ') || 'none')}</b></p>
     <table><thead><tr><th>Tier</th><th>Days ahead</th><th>Every</th><th>Last run</th></tr></thead><tbody>
