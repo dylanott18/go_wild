@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { buildAirports } from '../web/lib/airports.js';
 import { addDays, localToday } from '../web/lib/time.js';
 import { FrontierClient } from './frontier.js';
+import { buildAlerts, sendAlerts } from './alerts.js';
 import {
   emptyDay, mergeRouteScan, learnLegs, summarizeDay, minFareByRoute,
   isNoService, recordRouteResult,
@@ -151,6 +152,7 @@ async function getDay(date) {
   return days.get(date);
 }
 
+const alertEvents = [];
 const stats = { at: nowSec, planned, pages: 0, ok: 0, empty: 0, blocked: 0, errors: 0, changes: 0, aborted: false, tiers: tiers.map((t) => t.name), sampleErrors: [] };
 const deadline = nowMs + (config.maxMinutes ?? 45) * 60000;
 const abortAfter = config.abortAfterConsecutiveBlocks ?? 6;
@@ -174,7 +176,9 @@ async function worker(id) {
       stats.ok++;
       const ts = Math.floor(Date.now() / 1000);
       const day = await getDay(t.date);
-      stats.changes += mergeRouteScan(day, route, res.itineraries, ts);
+      const evs = mergeRouteScan(day, route, res.itineraries, ts);
+      stats.changes += evs.length;
+      for (const ev of evs) alertEvents.push({ ...ev, date: t.date });
       learnLegs(routes, res.itineraries, t.date);
       recordRouteResult(state, route, res.itineraries.length, ts);
       if (!res.itineraries.length) stats.empty++;
@@ -216,6 +220,17 @@ runs.unshift(stats);
 await writeJSON(path.join(DATA, 'runs.json'), runs.slice(0, 60));
 
 await writeIndex(runs);
+
+const alerts = buildAlerts(alertEvents, config.alerts ?? []);
+if (alerts.length) {
+  if (process.env.NTFY_TOPIC) {
+    const sent = await sendAlerts(alerts, { topic: process.env.NTFY_TOPIC, server: process.env.NTFY_SERVER, siteUrl: process.env.SITE_URL });
+    log(`Sent ${sent} alert notification(s).`);
+  } else {
+    log(`${alerts.length} alert(s) matched, but the NTFY_TOPIC secret isn't set:`);
+    for (const a of alerts) console.log(`  [${a.title}] ${a.message.split('\n').join(' | ')}`);
+  }
+}
 log(`Done: ${stats.ok} ok (${stats.empty} empty), ${stats.blocked} blocked, ${stats.errors} errors, ${stats.changes} seat/fare changes.`);
 if (stats.ok === 0 && stats.pages > 0) process.exitCode = 1;
 
@@ -242,6 +257,7 @@ async function writeIndex(runsList) {
     homeAirports: home,
     hubs,
     extraAirports: config.extraAirports ?? [],
+    alerts: (config.alerts ?? []).map((a) => ({ name: a.name, from: a.from, to: a.to, notify: a.notify })),
     tiers: (config.tiers ?? []).map((t) => ({ name: t.name, scope: t.scope, daysAhead: t.daysAhead, everyMinutes: t.everyMinutes, lastRun: state.tiers?.[t.name] ?? null })),
     lastRun: runs[0] ?? null,
     recentRuns: runs.slice(0, 12).map((r) => ({ at: r.at, pages: r.pages, ok: r.ok, blocked: r.blocked, errors: r.errors, aborted: r.aborted })),

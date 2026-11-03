@@ -8,6 +8,10 @@ A free, self-hosted tracker for Frontier **GoWild Pass** seats. Scheduled GitHub
 - **Day trips ("no hotel").** Out in the morning and back the same night, with GoWild seats both ways, ranked by hours at the destination.
 - **Hidden connections.** Two separate GoWild tickets through a connecting airport that Frontier won't sell as one itinerary. Destinations you can *only* reach this way are listed first.
 - **Seat and fare history.** Each flight's seats-left and fare over time, and each route's lowest GoWild fare by departure date (60 days kept).
+- **Overnight layover flags.** Connections that leave you sleeping in an airport are tagged ("☾ Overnight in IAH · 9h 12m"), with a one-tap filter to hide them.
+- **Route map.** Everywhere from/to as a map. Dot size shows the number of flights; tap a dot for details.
+- **10-day weather.** A forecast chip for each destination on your date (rough weather highlighted), plus a 10-day strip in every flight's details. Data from Open-Meteo, no key needed.
+- **Phone alerts.** Push notifications through the free ntfy app when GoWild seats open, drop to 2 or fewer, or sell out on routes you watch.
 - **Trackr.** Press and hold any flight (or tap ☆) to pin it. Share your Trackr with friends as a link.
 - **Scanner health.** The header pill shows data age and whether Frontier blocked the last run.
 
@@ -51,6 +55,19 @@ After that it runs on its own every 30 minutes, plus extra runs just after midni
 
 With the defaults and one home airport, a steady state is roughly 600–700 page loads per hour. For a lighter footprint, set `daysAhead` to `[0, 1]` only, raise `everyMinutes`, or drop hubs.
 
+## Phone alerts (optional)
+
+1. Install the **ntfy** app (iOS/Android) and subscribe to a hard-to-guess topic, e.g. `gowild-k3j9x2`. Friends can subscribe to the same topic.
+2. In the repo, go to **Settings → Secrets and variables → Actions → New repository secret**: name `NTFY_TOPIC`, value = your topic.
+3. Add rules to `"alerts"` in `config.json`. In the app, open any flight and tap **Get alerts** for a ready-made rule.
+
+```json
+{ "name": "DEN to LAS", "from": "DEN", "to": "LAS", "nonstopOnly": true, "maxFare": 40,
+  "dates": ["2026-11-20"], "notify": ["opened", "low", "soldout"] }
+```
+
+`to: "*"` watches every destination. Leave out `dates` to watch every scanned date. Overnight connections are ignored unless you set `"noOvernight": false`. Each run sends at most one notification per rule, and nothing is sent for a route's very first scan.
+
 ## If Frontier blocks GitHub's servers
 
 Bot protection sometimes blocks datacenter IPs. If the status pill says **Scanner blocked**, run the scanner from your own computer, which has a home IP, and push the data:
@@ -66,7 +83,7 @@ Then commit the `data/` folder to the `data` branch, or set up a cron job on a h
 ## Develop
 
 ```bash
-npm test          # parser, merge/history, day trips, hidden connections
+npm test          # parser, merge/history, alerts, overnight detection, day trips, hidden connections
 npm run demo      # FAKE sample data + local server on :8080 to preview the UI
 npm run plan      # show what the next scan would fetch, without touching Frontier
 npm run scrape -- --route=DEN-LAS --date=2026-11-05 --headed   # watch one real fetch

@@ -66,3 +66,41 @@ test('time zone helpers round-trip', () => {
   assert.equal(localNow('America/Denver', ms), '2026-11-05T06:00');
   assert.equal(addDays('2026-12-31', 1), '2027-01-01');
 });
+
+import { layovers, isOvernight, matchesWatch } from '../web/lib/planner.js';
+import { buildAlerts } from '../scraper/alerts.js';
+import { mergeRouteScan, emptyDay } from '../scraper/store.js';
+
+const conn = (a, b) => ({ o: 'DEN', d: 'LAS', st: 1, legs: [['F91', 'DEN', 'IAH', '2026-11-03T17:17', a], ['F92', 'IAH', 'LAS', b, '2026-11-04T09:00']] });
+
+test('overnight detection (from real Frontier itineraries)', () => {
+  assert.ok(isOvernight(conn('2026-11-03T20:48', '2026-11-04T06:00'))); // sleep at IAH
+  assert.ok(isOvernight(conn('2026-11-04T00:43', '2026-11-04T11:30'))); // land after midnight, leave late morning
+  assert.ok(!isOvernight(conn('2026-11-03T23:30', '2026-11-04T00:30'))); // tight red-eye connection
+  assert.ok(!isOvernight(conn('2026-11-03T12:00', '2026-11-03T14:00')));
+  assert.equal(layovers(conn('2026-11-03T12:00', '2026-11-03T14:00'))[0].min, 120);
+});
+
+test('alert events: opened / low / soldout, none on first scan', () => {
+  const it = (gw, gws) => ({ k: 'a', o: 'DEN', d: 'LAS', dep: '2026-11-05T06:00', arr: '2026-11-05T07:00', st: 0, legs: [['F91', 'DEN', 'LAS', '2026-11-05T06:00', '2026-11-05T07:00']], gw, gws });
+  const day = emptyDay('2026-11-05');
+  assert.deepEqual(mergeRouteScan(day, 'DEN-LAS', [it(null, null)], 1), []);
+  assert.deepEqual(mergeRouteScan(day, 'DEN-LAS', [it(15, 6)], 2).map((e) => e.type), ['opened']);
+  assert.deepEqual(mergeRouteScan(day, 'DEN-LAS', [it(15, 5)], 3).map((e) => e.type), []);
+  assert.deepEqual(mergeRouteScan(day, 'DEN-LAS', [it(15, 2)], 4).map((e) => e.type), ['low']);
+  assert.deepEqual(mergeRouteScan(day, 'DEN-LAS', [it(null, null)], 5).map((e) => e.type), ['soldout']);
+  const fresh = emptyDay('2026-11-05');
+  assert.deepEqual(mergeRouteScan(fresh, 'DEN-LAS', [it(15, 6)], 1), []); // first-ever scan: no flood
+});
+
+test('watch rules and alert messages', () => {
+  const it = { o: 'DEN', d: 'LAS', st: 0, dep: '2026-11-05T06:00', legs: [['F91', 'DEN', 'LAS', '2026-11-05T06:00', '2026-11-05T07:00']], gw: 15.41, gws: 3 };
+  assert.ok(matchesWatch({ from: 'DEN', to: '*' }, it, '2026-11-05'));
+  assert.ok(!matchesWatch({ from: 'DEN', to: 'MCO' }, it, '2026-11-05'));
+  assert.ok(!matchesWatch({ from: 'DEN', maxFare: 10 }, it, '2026-11-05'));
+  assert.ok(!matchesWatch({ from: 'DEN', dates: ['2026-11-06'] }, it, '2026-11-05'));
+  const [a] = buildAlerts([{ type: 'opened', it, date: '2026-11-05' }, { type: 'soldout', it, date: '2026-11-05' }], [{ name: 'Vegas', from: 'DEN', to: 'LAS' }]);
+  assert.equal(a.title, 'Vegas');
+  assert.equal(a.message, 'GoWild open: DEN→LAS 11-05 6:00a $15.41 · 3 left');
+  assert.equal(a.priority, 4);
+});

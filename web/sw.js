@@ -1,7 +1,7 @@
 // Offline shell + network-first data so the app opens instantly on a phone
 // but always shows the freshest scan when online.
-const SHELL = 'gowild-shell-v1';
-const ASSETS = ['./', 'index.html', 'styles.css', 'app.js', 'lib/airports.js', 'lib/time.js', 'lib/planner.js', 'lib/links.js', 'lib/charts.js', 'icon.svg', 'manifest.webmanifest'];
+const SHELL = 'gowild-shell-v2';
+const ASSETS = ['./', 'index.html', 'styles.css', 'app.js', 'lib/airports.js', 'lib/time.js', 'lib/planner.js', 'lib/links.js', 'lib/charts.js', 'lib/weather.js', 'lib/map.js', 'icon.svg', 'manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));

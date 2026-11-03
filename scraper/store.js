@@ -26,6 +26,10 @@ function worthKeeping(it, hadHistory) {
  *   fs first-seen epoch, t last-checked epoch
  * GoWild itineraries that vanish from results are kept with gw=null and
  * gone=true so the history shows when they sold out.
+ *
+ * Returns change events for alerts:
+ *   { type: 'opened' | 'low' | 'soldout', it, prevSeats }
+ * No 'opened' events on a route's first-ever scan (avoids alert floods).
  */
 export function mergeRouteScan(day, route, fresh, ts) {
   const [o, d] = route.split('-');
@@ -36,7 +40,9 @@ export function mergeRouteScan(day, route, fresh, ts) {
     else keep.push(it);
   }
   const seen = new Set();
-  let changes = 0;
+  const events = [];
+  const firstScan = day.scans[route] == null;
+  const LOW = 2;
   for (const n of fresh) {
     if (seen.has(n.k)) continue;
     seen.add(n.k);
@@ -44,7 +50,11 @@ export function mergeRouteScan(day, route, fresh, ts) {
     const h = prev?.h ? prev.h.slice() : [];
     const last = h[h.length - 1];
     if (!last || last[1] !== n.gw || last[2] !== n.gws) {
-      if (last || n.gw != null) { h.push([ts, n.gw, n.gws]); changes++; }
+      if (last || n.gw != null) h.push([ts, n.gw, n.gws]);
+      const wasOpen = last ? last[1] != null : false;
+      if (n.gw != null && !wasOpen && !firstScan) events.push({ type: 'opened', it: n, prevSeats: null });
+      else if (n.gw != null && wasOpen && n.gws != null && n.gws <= LOW && (last[2] == null || last[2] > LOW)) events.push({ type: 'low', it: n, prevSeats: last[2] });
+      else if (n.gw == null && wasOpen) events.push({ type: 'soldout', it: n, prevSeats: last[2] });
     }
     while (h.length > HISTORY_CAP) h.shift();
     if (!worthKeeping(n, h.length > 0)) continue;
@@ -57,13 +67,13 @@ export function mergeRouteScan(day, route, fresh, ts) {
     const hadGoWild = prev.h?.some((p) => p[1] != null);
     if (!hadGoWild) continue;
     const h = prev.h.slice();
-    if (h[h.length - 1][1] !== null) { h.push([ts, null, 0]); changes++; }
+    if (h[h.length - 1][1] !== null) { events.push({ type: 'soldout', it: prev, prevSeats: h[h.length - 1][2] }); h.push([ts, null, 0]); }
     keep.push({ ...prev, gw: null, gws: 0, gone: true, h, t: ts });
   }
   keep.sort((a, b) => (a.dep < b.dep ? -1 : a.dep > b.dep ? 1 : a.k < b.k ? -1 : 1));
   day.itins = keep;
   day.scans[route] = ts;
-  return changes;
+  return events;
 }
 
 /** Record nonstop legs observed in any itinerary (learned route network). */

@@ -1,6 +1,8 @@
 import { buildAirports } from './lib/airports.js';
 import { localNow, localToday, addDays, fmtDuration, fmtClock, fmtAgo, localMinutesBetween } from './lib/time.js';
-import { findDayTrips, findHiddenConnections, seatLevel } from './lib/planner.js';
+import { findDayTrips, findHiddenConnections, seatLevel, layovers, isOvernight } from './lib/planner.js';
+import { forecasts, chip as wxChip, describe as wxDescribe, isRough } from './lib/weather.js';
+import { drawRouteMap, destroyMap } from './lib/map.js';
 import { frontierUrl } from './lib/links.js';
 import { lineChart, sparkline } from './lib/charts.js';
 
@@ -27,7 +29,7 @@ function toast(msg) {
 // ---------------------------------------------------------------- state
 let AIRPORTS = buildAirports();
 let AP = Object.fromEntries(AIRPORTS.map((a) => [a.code, a]));
-const DEFAULT_FILTERS = { gw: true, nonstop: false, hideDeparted: true, minSeats: 0, window: 'any', sort: 'dep', q: '', ground: 4, minLay: 90, maxLay: 360, hiddenDir: 'from' };
+const DEFAULT_FILTERS = { gw: true, nonstop: false, hideDeparted: true, noOvernight: false, minSeats: 0, window: 'any', sort: 'dep', q: '', ground: 4, minLay: 90, maxLay: 360, hiddenDir: 'from' };
 const S = {
   index: null,
   days: new Map(),
@@ -38,6 +40,8 @@ const S = {
   f: { ...DEFAULT_FILTERS, ...store.get('gw.filters', {}) },
   expanded: new Set(),
   track: store.get('gw.track', []),
+  view: store.get('gw.view', 'list'),
+  mapGroups: null,
 };
 
 function readHash() {
@@ -148,7 +152,8 @@ function renderFilters() {
   const sel = (key, label, opts) => `<label class="muted" style="font-size:13px">${label} <select data-sel="${key}">${opts.map(([v, t]) => `<option value="${v}"${String(f[key]) === String(v) ? ' selected' : ''}>${t}</option>`).join('')}</select></label>`;
   let html = '';
   if (S.mode === 'from' || S.mode === 'to') {
-    html = tog('gw', 'GoWild only') + tog('nonstop', 'Nonstop only') + tog('hideDeparted', 'Hide departed')
+    html = `<span class="seg"><button class="toggle" data-view="list" aria-pressed="${S.view !== 'map'}">List</button><button class="toggle" data-view="map" aria-pressed="${S.view === 'map'}">Map</button></span>`
+      + tog('gw', 'GoWild only') + tog('nonstop', 'Nonstop only') + tog('noOvernight', 'No overnight layovers') + tog('hideDeparted', 'Hide departed')
       + sel('minSeats', 'Seats', [[0, 'Any'], [1, '1+'], [2, '2+'], [4, '4+'], [6, '6+']])
       + sel('window', 'Departs', [['any', 'Any time'], ['morning', 'Before noon'], ['afternoon', '12–5pm'], ['evening', 'After 5pm']])
       + sel('sort', 'Sort', [['dep', 'Departure'], ['price', 'GoWild price'], ['seats', 'Most seats'], ['dur', 'Shortest'], ['code', 'Airport A–Z']])
@@ -166,6 +171,8 @@ function renderFilters() {
   }
   box.innerHTML = html;
   box.onclick = (e) => {
+    const v = e.target.closest('[data-view]');
+    if (v) { S.view = v.dataset.view; store.set('gw.view', S.view); render(); return; }
     const b = e.target.closest('[data-tog]');
     if (!b) return;
     f[b.dataset.tog] = !f[b.dataset.tog];
@@ -226,6 +233,8 @@ const seatsRank = (it) => (it.gw == null ? -1 : it.gws ?? 99);
 function flightRow(it, date, { compact = false } = {}) {
   const lvl = seatLevel(it);
   const via = it.st === 0 ? 'Nonstop' : `${it.st} stop${it.st > 1 ? 's' : ''} · via ${it.legs.slice(0, -1).map((l) => l[2]).join(', ')}`;
+  const night = layovers(it).find((l) => l.overnight);
+  const nightTag = night ? `<span class="tag-night" title="You'd spend the night at ${esc(night.at)}">☾ Overnight in ${esc(night.at)} · ${fmtDuration(night.min)}</span>` : '';
   const nums = it.legs.map((l) => l[0].replace(/^F9/, 'F9 ')).join(' + ');
   const nextDay = it.arr.slice(0, 10) !== it.dep.slice(0, 10) ? '<sup>+1</sup>' : '';
   const pinned = pinnedKey(it.k, date);
@@ -233,7 +242,7 @@ function flightRow(it, date, { compact = false } = {}) {
   const den = it.den != null ? `Den ${money(it.den)}${it.dens != null ? ` · ${it.dens} left` : ''}` : (it.std != null ? `Std ${money(it.std)}` : '');
   return `<div class="flight${departed ? ' departed' : ''}" data-k="${esc(it.k)}" data-date="${date}">
     <div class="times"><b>${fmtClock(it.dep)} → ${fmtClock(it.arr)}${nextDay}</b>
-      <div class="sub">${compact ? '' : `<span class="mono">${esc(it.o)}→${esc(it.d)}</span> · `}${fmtDuration(it.dur)} · ${esc(via)}</div>
+      <div class="sub">${compact ? '' : `<span class="mono">${esc(it.o)}→${esc(it.d)}</span> · `}${fmtDuration(it.dur)} · ${esc(via)}</div>${nightTag}
       <div class="sub mono">${esc(nums)}${departed ? ' · departed' : ''}</div></div>
     <div class="seatcol"><span class="badge ${lvl.level}"><span class="dot ${lvl.level}"></span>${lvl.label}</span>
       ${den ? `<span class="sub">${den}</span>` : ''}${sparkline(it.h)}</div>
@@ -255,6 +264,7 @@ function viewEverywhere(day) {
   let list = day.itins.filter((it) => (dir === 'from' ? it.o === S.origin : it.d === S.origin)
     && (!f.gw || it.gw != null) && (!f.nonstop || it.st === 0)
     && (!f.minSeats || (it.gw != null && (it.gws == null || it.gws >= f.minSeats)))
+    && (!f.noOvernight || !isOvernight(it))
     && (!f.hideDeparted || !isDeparted(it)) && inWindow(it.dep) && matchQ(other(it)));
   if (!list.length) {
     return emptyState('No matching flights', f.gw ? 'No GoWild seats match these filters on this date. Try another date or loosen the filters.' : 'Nothing matches these filters.');
@@ -283,6 +293,10 @@ function viewEverywhere(day) {
   arr.sort(gsort);
   const gwCount = list.filter((i) => i.gw != null).length;
   const head = `<div class="summary">${arr.length} ${dir === 'from' ? 'destinations' : 'origins'} · ${list.length} flights${f.gw ? '' : ` (${gwCount} with GoWild)`} · ${fmtDate(S.date)} · checked ${fmtAgo(S.index.dates[S.date]?.scannedAt)}</div>`;
+  if (S.view === 'map') {
+    S.mapGroups = arr;
+    return `${head}<div id="map" class="map" role="region" aria-label="Route map"></div><p class="muted" style="font-size:12px">Dot size = number of flights. Tap a dot for details, or switch to List to see every flight.</p>`;
+  }
   return head + arr.map(({ code, its }) => {
     const a = AP[code];
     const gwIts = its.filter((i) => i.gw != null);
@@ -293,7 +307,7 @@ function viewEverywhere(day) {
     const shown = open ? its : its.slice(0, 3);
     const route = dir === 'from' ? `${S.origin}-${code}` : `${code}-${S.origin}`;
     return `<section class="group" data-group="${code}">
-      <div class="group-head"><span class="code">${esc(code)}</span><span class="city">${esc(a ? `${a.city}, ${a.region}` : '')}${a?.intl ? ' · International' : ''}</span>
+      <div class="group-head"><span class="code">${esc(code)}</span><span class="city">${esc(a ? `${a.city}, ${a.region}` : '')}${a?.intl ? ' · International' : ''}</span><span data-wx="${code}"></span>
         <span class="stats"><span>${its.length} flight${its.length > 1 ? 's' : ''}${nonstops ? ` · ${nonstops} nonstop` : ''}${best != null ? ` · from <b>${money(best)}</b>` : ''}${seats ? ` · ${seats}` : ''}</span>
         <button class="icon-btn" type="button" data-history="${route}" title="Fare history for ${route}" style="min-height:28px;padding:2px 8px;font-size:12px">History</button></span></div>
       <div class="group-body">${shown.map((it) => flightRow(it, S.date)).join('')}</div>
@@ -313,7 +327,7 @@ function viewTrips(day) {
     + trips.map((t) => {
       const a = AP[t.dest];
       const total = (t.out.gw ?? 0) + (t.back.gw ?? 0);
-      return `<section class="group trip"><div class="group-head"><span class="code">${esc(t.dest)}</span><span class="city">${esc(a ? `${a.city}, ${a.region}` : '')}</span>
+      return `<section class="group trip"><div class="group-head"><span class="code">${esc(t.dest)}</span><span class="city">${esc(a ? `${a.city}, ${a.region}` : '')}</span><span data-wx="${t.dest}"></span>
         <span class="stats"><span><b>${fmtDuration(t.groundMin)}</b> there${t.options > 1 ? ` · ${t.options} combos` : ''}${S.f.gw ? ` · ${money(total)} total` : ''}</span></span></div>
         <div class="group-body"><div class="leg-label">Outbound</div>${flightRow(t.out, S.date, { compact: true })}
         <div class="between">${fmtDuration(t.groundMin)} in ${esc(a?.city ?? t.dest)} (land ${fmtClock(t.out.arr)}, leave ${fmtClock(t.back.dep)})</div>
@@ -346,7 +360,7 @@ function viewHidden(day) {
       const a = AP[code];
       const open = S.expanded.has(`h:${code}`);
       const shown = open ? list : list.slice(0, 2);
-      return `<section class="group"><div class="group-head"><span class="code">${esc(code)}</span><span class="city">${esc(a ? `${a.city}, ${a.region}` : '')}</span>
+      return `<section class="group"><div class="group-head"><span class="code">${esc(code)}</span><span class="city">${esc(a ? `${a.city}, ${a.region}` : '')}</span><span data-wx="${code}"></span>
         <span class="stats"><span>${directs.has(code) ? 'also on a single GoWild ticket' : '<b>only possible this way</b>'} · via ${[...new Set(list.map((r) => r.via))].join(', ')}</span></span></div>
         <div class="group-body">${shown.map((r) => `<div class="trip"><div class="leg-label">Ticket 1 · ${esc(r.o)}→${esc(r.via)}</div>${flightRow(r.first, S.date)}
           <div class="between">Layover <b>${fmtDuration(r.layoverMin)}</b> in ${esc(AP[r.via]?.city ?? r.via)} · ${money(r.total)} total${r.minSeats != null ? ` · ${r.minSeats} seat${r.minSeats === 1 ? "" : "s"} on the tighter leg` : ''} · book separately</div>
@@ -402,7 +416,43 @@ async function renderResults() {
   if (seq !== renderSeq) return;
   renderNotices(day);
   if (!day) { box.innerHTML = ''; return; }
+  S.mapGroups = null;
   box.innerHTML = S.mode === 'trips' ? viewTrips(day) : S.mode === 'hidden' ? viewHidden(day) : viewEverywhere(day);
+  afterRender(seq);
+}
+
+async function fillWeather(seq) {
+  const slots = [...document.querySelectorAll('[data-wx]')];
+  const codes = [...new Set(slots.map((n) => n.dataset.wx))].filter((c) => AP[c]);
+  if (!codes.length) return;
+  const wx = await forecasts(codes.map((c) => AP[c]));
+  if (seq !== renderSeq) return;
+  for (const n of slots) n.innerHTML = wxChip(wx.get(n.dataset.wx)?.days?.[S.date]);
+}
+
+async function afterRender(seq) {
+  const el = $('#map');
+  if (el && S.mapGroups) {
+    const dir = S.mode;
+    const points = S.mapGroups.filter((g) => AP[g.code]).map(({ code, its }) => {
+      const gw = its.filter((i) => i.gw != null);
+      const best = gw.length ? Math.min(...gw.map((i) => i.gw)) : null;
+      const a = AP[code];
+      return {
+        airport: a,
+        count: its.length,
+        popupHtml: `<div class="map-pop"><b>${esc(code)}</b> ${esc(a.city)}, ${esc(a.region)}<br>${its.length} flight${its.length > 1 ? 's' : ''} ${dir === 'from' ? 'there' : 'to ' + esc(S.origin)} · ${its.filter((i) => i.st === 0).length} nonstop${best != null ? `<br>GoWild from <b>${money(best)}</b>` : ''}<br>First: ${fmtClock(its[0].dep)} · ${seatLevel(its[0]).label}<br><button type="button" data-pick>See flights</button></div>`,
+      };
+    });
+    try {
+      await drawRouteMap(el, AP[S.origin], points, (code) => { S.view = 'list'; store.set('gw.view', 'list'); S.f.q = code; render(); });
+    } catch (e) {
+      el.innerHTML = `<div class="empty">Couldn't load the map (${esc(e.message)}). Switch to List.</div>`;
+    }
+  } else {
+    destroyMap();
+  }
+  fillWeather(seq).catch(() => {});
 }
 
 function render() {
@@ -536,7 +586,9 @@ async function openFlight(k, date) {
     </tbody></table>
     <p style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px"><a class="toggle" href="${frontierUrl(it.o, it.d, date)}" target="_blank" rel="noopener">Book on Frontier ↗</a>
       <button class="toggle" type="button" id="m-pin">${pinnedKey(k, date) ? '★ Pinned' : '☆ Pin to Trackr'}</button>
-      <button class="toggle" type="button" id="m-hist">Route fare history</button></p>
+      <button class="toggle" type="button" id="m-hist">Route fare history</button>
+      <button class="toggle" type="button" id="m-alert">Get alerts</button></p>
+    <h4>Weather in ${esc(AP[it.d]?.city ?? it.d)}</h4><div id="m-wx" class="wx-strip muted">Loading forecast…</div>
     <h4>GoWild seats left over time</h4><div id="m-seats"></div>
     <h4>GoWild fare over time</h4><div id="m-fare"></div>
     <p class="muted" style="font-size:12px">First seen ${it.fs ? fmtTs(it.fs * 1000) : '—'} · ${it.h?.length ?? 0} recorded changes. A gap means Frontier showed GoWild seats without a count; 0 means sold out.</p>`;
@@ -548,6 +600,17 @@ async function openFlight(k, date) {
   openModal(`${it.o} → ${it.d} · ${fmtDate(date)}`, frag);
   $('#m-pin').onclick = () => { togglePin(k, date); $('#m-pin').textContent = pinnedKey(k, date) ? '★ Pinned' : '☆ Pin to Trackr'; };
   $('#m-hist').onclick = () => openRouteHistory(`${it.o}-${it.d}`);
+  $('#m-alert').onclick = () => openAlertHelp(it, date);
+  forecasts([AP[it.d]].filter(Boolean)).then((wx) => {
+    const box = $('#m-wx');
+    if (!box) return;
+    const days = Object.entries(wx.get(it.d)?.days ?? {}).filter(([d]) => d >= date).slice(0, 10);
+    box.classList.remove('muted');
+    box.innerHTML = days.length ? days.map(([d, w]) => {
+      const { icon, label } = wxDescribe(w.code);
+      return `<div class="wx-day${isRough(w) ? ' rough' : ''}${d === date ? ' sel' : ''}" title="${label}${w.pop != null ? ` · ${w.pop}% precip` : ''}"><div class="muted">${d === date ? 'Trip' : fmtDate(d).slice(0, 3)}</div><div class="wx-icon">${icon}</div><div>${Math.round(w.hi)}°</div><div class="muted">${Math.round(w.lo)}°</div>${w.pop != null ? `<div class="muted">${w.pop}%</div>` : ''}</div>`;
+    }).join('') : '<span class="muted">Forecast unavailable for this date.</span>';
+  });
 }
 
 async function openRouteHistory(route) {
@@ -565,6 +628,21 @@ async function openRouteHistory(route) {
     <p class="muted" style="font-size:12px">Each point is the lowest GoWild fare seen for a flight departing that day. Gaps are days with no GoWild seats, or days that weren't scanned.</p>`;
   $('#rh', node).append(lineChart(pts, { title: `Lowest GoWild fare by date, ${route}`, xFmt: (x) => { const d = new Date(x); return `${MON[d.getUTCMonth()]} ${d.getUTCDate()}`; }, yFmt: (v) => `$${v.toFixed(0)}` }));
   openModal(`Fare history · ${route.replace('-', ' → ')}`, node);
+}
+
+function openAlertHelp(it, date) {
+  const rule = { name: `${it.o} to ${it.d} ${date.slice(5)}`, from: it.o, to: it.d, dates: [date], ...(it.st === 0 ? { nonstopOnly: true } : {}), notify: ['opened', 'low', 'soldout'] };
+  const json = JSON.stringify(rule);
+  openModal('Phone alerts for this route', `<p>The scanner can send a push notification to your phone when GoWild seats <b>open</b>, drop to <b>2 or fewer</b>, or <b>sell out</b> on this route.</p>
+    <ol>
+      <li>Install the free <b>ntfy</b> app (iOS / Android) and subscribe to a hard-to-guess topic name, e.g. <span class="mono">gowild-${Math.random().toString(36).slice(2, 10)}</span>.</li>
+      <li>In GitHub, open the repo → Settings → Secrets and variables → Actions → New repository secret: name <span class="mono">NTFY_TOPIC</span>, value = your topic. (One-time.)</li>
+      <li>Add this rule to the <span class="mono">"alerts"</span> list in <span class="mono">config.json</span>:</li>
+    </ol>
+    <pre class="code" id="alert-json">${esc(json)}</pre>
+    <p><button class="toggle" type="button" id="copy-alert">Copy rule</button></p>
+    <p class="muted" style="font-size:12px">Friends can subscribe to the same topic to get the same alerts. Remove "dates" to watch every scanned date; use "to": "*" for anywhere.</p>`);
+  $('#copy-alert').onclick = async () => { try { await navigator.clipboard.writeText(json); toast('Rule copied'); } catch { prompt('Copy this rule', json); } };
 }
 
 function openCalendar() {
@@ -618,6 +696,8 @@ function openStatus() {
       ${(idx.tiers ?? []).map((t) => `<tr><td>${esc(t.name)}</td><td>${esc((t.daysAhead ?? []).join(', '))}</td><td>${Math.round(t.everyMinutes / 60 * 10) / 10}h</td><td>${fmtAgo(t.lastRun)}</td></tr>`).join('')}</tbody></table>
     <h4>Recent runs</h4><table><thead><tr><th>When</th><th>Pages</th><th>OK</th><th>Blocked</th><th>Errors</th></tr></thead><tbody>
       ${(idx.recentRuns ?? []).map((r) => `<tr><td>${fmtAgo(r.at)}</td><td>${r.pages}</td><td>${r.ok}</td><td>${r.blocked}</td><td>${r.errors}${r.aborted ? ' (stopped early)' : ''}</td></tr>`).join('')}</tbody></table>
+    <h4>Phone alerts</h4>${(idx.alerts ?? []).length ? `<ul>${idx.alerts.map((a) => `<li>${esc(a.name ?? `${a.from} to ${a.to}`)} <span class="muted">(${esc((a.notify ?? ['opened', 'low']).join(', '))})</span></li>`).join('')}</ul>` : '<p class="muted">No alert rules yet.</p>'}
+    <p class="muted" style="font-size:12px">Alerts arrive through the ntfy app once the <span class="mono">NTFY_TOPIC</span> secret is set. Open any flight and tap "Get alerts" for a ready-made rule.</p>
     <p class="muted" style="font-size:12px">To change airports or how often scans run, edit <span class="mono">config.json</span> in the repo.</p>`;
   openModal('Scanner status', html);
 }

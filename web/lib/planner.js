@@ -97,3 +97,36 @@ export function seatLevel(it) {
   if (it.gws <= 5) return { level: 'warning', label: `${it.gws} left` };
   return { level: 'good', label: `${it.gws} left` };
 }
+
+/** Connections inside one itinerary: [{at, min, overnight}] */
+export function layovers(it) {
+  const res = [];
+  for (let i = 1; i < it.legs.length; i++) {
+    const arr = it.legs[i - 1][4];
+    const dep = it.legs[i][3];
+    if (!arr || !dep) continue;
+    const min = localMinutesBetween(arr, dep);
+    // Overnight = the next flight leaves on a later calendar day, or a long
+    // gap that spans 1am–5am (a night spent in the airport).
+    const overnight = dep.slice(0, 10) > arr.slice(0, 10) ? min > 180 || dep.slice(11) >= '05:00'
+      : min >= 360 && arr.slice(11) < '05:00';
+    res.push({ at: it.legs[i][1], min, overnight });
+  }
+  return res;
+}
+
+export const isOvernight = (it) => layovers(it).some((l) => l.overnight);
+
+/**
+ * Does an itinerary match an alert watch rule from config.json?
+ * rule: { from, to ("*" = anywhere), nonstopOnly, maxFare, dates: [..] }
+ */
+export function matchesWatch(rule, it, date) {
+  if (rule.from && rule.from !== '*' && rule.from !== it.o) return false;
+  if (rule.to && rule.to !== '*' && rule.to !== it.d) return false;
+  if (rule.nonstopOnly && it.st !== 0) return false;
+  if (rule.noOvernight !== false && isOvernight(it)) return false;
+  if (rule.maxFare != null && (it.gw == null || it.gw > rule.maxFare)) return false;
+  if (rule.dates?.length && !rule.dates.includes(date)) return false;
+  return true;
+}
